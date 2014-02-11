@@ -7,8 +7,11 @@ import java.net.ServerSocket;
 import java.net.Socket;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.ListIterator;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.logging.Logger;
+
+import javax.sql.rowset.spi.SyncResolver;
 
 import utils.ChatUtils;
 
@@ -18,6 +21,8 @@ public class Server implements Runnable{
 	private LinkedBlockingQueue<String> messages;
 	private List<ServerCrawler> clients;
 	private ServerSocket serverSocket;
+	
+	private boolean clientsLocked = false;
 	
 	private static final String USER_MESSAGE_SEPARATOR = ";";
 	private static final String USER_PRIVATE_MESSAGE_CLIENTS_SEPARATOR = ",";
@@ -78,7 +83,11 @@ public class Server implements Runnable{
 		}	
 	}
 	
-	private void sendMessageToAll(String messageToSend){
+	private synchronized void sendMessageToAll(String messageToSend) throws InterruptedException{
+		while(clientsLocked){
+			wait();
+		}
+		clientsLocked = true;
 		String[] data = messageToSend.split(USER_MESSAGE_SEPARATOR);
 		List<ServerCrawler> toRemove = new ArrayList<ServerCrawler>();
 		for (ServerCrawler serverCrawler : clients) {
@@ -104,6 +113,8 @@ public class Server implements Runnable{
 			}
 		}
 		clients.removeAll(toRemove);
+		clientsLocked = false;
+		notifyAll();
 	}
 	
 	private boolean isOnReceivers(String receivers, String currentClient){
@@ -129,7 +140,6 @@ public class Server implements Runnable{
 	}
 	
 	private class ServerCrawler implements Runnable{
-		private Logger serverCrawlerLogger;
 		
 		private BufferedReader inFromClient;
 		private BufferedWriter outToClient;
@@ -143,8 +153,6 @@ public class Server implements Runnable{
 			outToClient = ChatUtils.getBufferedWriter(socket.getOutputStream());
 			t = new Thread(this);
 			t.setDaemon(true);
-			serverCrawlerLogger = Logger.getLogger("ServerCrawler_"+t.getName());
-			
 			t.start();
 		}
 		
@@ -170,10 +178,35 @@ public class Server implements Runnable{
 			}	
 		}
 		
-		private void addClient() throws IOException{
-			this.clientNickName = ChatUtils.readFromSocket(inFromClient);//FIXME risolvere omonimia
-			ChatUtils.writeToSocket(outToClient, "WELCOME BACK " + clientNickName + "!");
+		private synchronized void addClient() throws IOException, InterruptedException{
+			while(clientsLocked){
+				wait();
+			}
+			clientsLocked = true;
+			String nicknameRequested = ChatUtils.readFromSocket(inFromClient);
+			if(!isNicknameAlreadyPresent(nicknameRequested)){
+				clientNickName = nicknameRequested;
+				ChatUtils.writeToSocket(outToClient, "WELCOME " + clientNickName + "!");				
+			} else {
+				clientNickName = nicknameRequested + "_" + socket.getInetAddress().getHostName();
+				ChatUtils.writeToSocket(outToClient, "WELCOME " + clientNickName + "!");
+			}
 			messages.add(SERVER_MESSAGE + USER_MESSAGE_SEPARATOR + clientNickName + " joined chat!");
+			clientsLocked = false;
+			notifyAll();
+		}
+		
+		private boolean isNicknameAlreadyPresent(String nicknameRequested){
+			ListIterator<ServerCrawler> clientsIterator = clients.listIterator();
+			boolean toRet = false;
+			while(clientsIterator.hasNext()){
+				ServerCrawler current = clientsIterator.next();
+				if(this != current && !nicknameRequested.equals(current.clientNickName)){
+					toRet = true;
+				}
+			}
+			
+			return toRet;
 		}
 		
 		private void enqueueMessageReceived(String message){
